@@ -1,0 +1,14 @@
+schema = 1
+id = "obsidian"
+name = "Obsidian"
+version = "0.1.0"
+description = "Obsidian vault compatibility: notes, wikilinks, properties, tags, Bases tables, canvas."
+icon = "file"
+host = "host.luau"
+window = "window.luau"
+
+[[blocks]]
+id = "note"
+title = "Obsidian Note"
+files = ["*.md", "*.base", "*.canvas"]
+palette = false

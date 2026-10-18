@@ -1,0 +1,19 @@
+{
+  "name": "tern-obsidian",
+  "version": "0.1.0",
+  "description": "Obsidian vault compatibility plugin for Tern",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun helper.mjs"
+  },
+  "dependencies": {
+    "mdast-util-to-string": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-wiki-link": "^2.0.1",
+    "unified": "^11.0.5",
+    "unist-util-visit": "^5.0.0"
+  }
+}

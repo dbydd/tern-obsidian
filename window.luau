@@ -1,0 +1,269 @@
+--!strict
+local bridge = require("./bridge")
+local exporter = require("./export")
+local canvasmod = require("./canvas")
+
+local roots: { [number]: string } = {}
+
+local function focused(cx: WindowCx): PaneInfo?
+	local id = cx.session:focused()
+	return if id then cx.session:pane(id) else nil
+end
+
+local function root_of(cx: WindowCx): string?
+	if cx.hosts:current().kind ~= "local" then
+		return nil
+	end
+	local pane = focused(cx)
+	if pane == nil then
+		return nil
+	end
+	return roots[pane.pane] or bridge.find(pane.cwd or "")
+end
+
+local function failure(cx: WindowCx?, err: string?)
+	if cx and err then
+		cx:toast("error", "Obsidian", err)
+	end
+end
+
+local function open_note(cx: WindowCx, root: string, rel: string, anchor: string?)
+	local path = root .. "/" .. rel
+	if rel:lower():match("%.md$") or rel:lower():match("%.base$") or rel:lower():match("%.canvas$") then
+		local pane = cx:new_block("obsidian.note", { path, anchor or "" })
+		if pane then
+			roots[pane] = root
+		end
+	else
+		cx:open(path)
+	end
+end
+
+local function pick_note(cx: WindowCx, root: string, ext: string?)
+	bridge.run({ op = "index", root = root }, function(result, err, next_cx)
+		if result == nil or next_cx == nil then
+			failure(next_cx, err)
+			return
+		end
+		local items: { PickItem } = {}
+		for _, note in result.notes do
+			if ext == nil or note.ext == ext then
+				local aliases = table.concat(note.aliases or {}, " · ")
+				local tags = table.concat(note.tags or {}, " #")
+				table.insert(items, {
+					label = note.name .. (if aliases ~= "" then " · " .. aliases else "") .. (if tags ~= "" then " #" .. tags else ""),
+					detail = note.rel,
+					rel = note.rel,
+				})
+			end
+		end
+		if #items == 0 then
+			next_cx:toast("info", "No matching vault files", result.root)
+			return
+		end
+		next_cx:pick({ items = items, placeholder = "Obsidian vault: " .. result.root, action = "open" }):next(function(item, pick_err, pick_cx)
+			if item and pick_cx then
+				open_note(pick_cx, result.root, item.rel :: string)
+			else
+				failure(pick_cx, pick_err)
+			end
+		end)
+	end)
+end
+
+tern.override("open_file", function(cx)
+	local root = root_of(cx)
+	if root == nil then
+		return false
+	end
+	pick_note(cx, root)
+	return true
+end)
+
+tern.command({
+	id = "open_note", title = "Obsidian: Open note", icon = "file",
+	run = function(cx)
+		local root = root_of(cx)
+		if root then
+			pick_note(cx, root)
+		else
+			cx:prompt({ placeholder = "Obsidian vault folder (absolute path)" }):next(function(value, err, next_cx)
+				if value and next_cx then
+					pick_note(next_cx, value)
+				else
+					failure(next_cx, err)
+				end
+			end)
+		end
+	end,
+})
+tern.command({
+	id = "open_base", title = "Obsidian: Open base", icon = "table",
+	run = function(cx)
+		local root = root_of(cx)
+		if root then pick_note(cx, root, "base") else cx:toast("error", "No Obsidian vault for this pane") end
+	end,
+})
+tern.command({
+	id = "refresh_index", title = "Obsidian: Refresh vault index", icon = "folder",
+	run = function(cx)
+		local root = root_of(cx)
+		if root == nil then
+			cx:toast("error", "No Obsidian vault for this pane")
+			return
+		end
+		bridge.run({ op = "index", root = root, refresh = true }, function(result, err, next_cx)
+			if result and next_cx then
+				next_cx:toast("success", "Vault indexed", tostring(result.count) .. " files · " .. tostring(#result.warnings) .. " metadata errors")
+			else failure(next_cx, err) end
+		end)
+	end,
+})
+
+tern.route.open(function(req, cx)
+	for _, host in cx.hosts:list() do
+		if host.name == req.host and host.kind ~= "local" then return nil end
+	end
+	local extension = req.path:lower():match("%.([^./]+)$")
+	if extension ~= "md" and extension ~= "base" and extension ~= "canvas" then return nil end
+	-- CLI opens must remain usable by EDITOR and --wait.
+	if req.origin == "cli" or req.line then return nil end
+	local root = bridge.find(req.path)
+	if root == nil then return nil end
+	-- The block decision keeps `tern open`/`file open` waiting on the new
+	-- block; the root is registered once the block exists.
+	tern.timer(800, function(next_cx)
+		if next_cx == nil then return end
+		for _, pane in next_cx.session:panes() do
+			if pane.block == "obsidian.note" and pane.path == req.path then
+				roots[pane.pane] = root
+				return
+			end
+		end
+	end)
+	return { block = "obsidian.note", args = { req.path } }
+end)
+
+tern.route.link(function(link, cx)
+	if link.url:match("^obsidian://source%?") then
+		local query = bridge.query(link.url)
+		if query.path then cx.docs:open(query.path) end
+		return { handled = true }
+	end
+	if not link.url:match("^obsidian://") then return nil end
+	local query = bridge.query(link.url)
+	local root = if query.root and query.root ~= "" then query.root elseif query.vault then nil else root_of(cx)
+	if query.tag and root then
+		bridge.run({ op = "tag", root = root, tag = query.tag }, function(result, err, next_cx)
+			if result and next_cx then
+				local pane, open_err = next_cx.canvas:open({ title = result.title, view = result.view })
+				if pane then roots[pane] = result.root else failure(next_cx, open_err) end
+			else failure(next_cx, err) end
+		end)
+		return { handled = true }
+	end
+	if query.file == nil then return nil end
+	local pane = focused(cx)
+	bridge.run({ op = "resolve", root = root, cwd = if pane then pane.cwd else nil, vault = query.vault, target = query.file .. (if query.anchor then "#" .. query.anchor else "") }, function(result, err, next_cx)
+		if result and next_cx then
+			if result.anchor and result.anchor ~= "" then
+				next_cx.docs:open(result.path, { line = result.line })
+			else
+				open_note(next_cx, result.root, result.rel)
+			end
+		else failure(next_cx, err) end
+	end)
+	return { handled = true }
+end)
+
+local function save_canvas(cx: WindowCx, pane: number, root: string)
+	local info = cx.canvas:get(pane)
+	if info == nil then
+		cx:toast("error", "Canvas is no longer open")
+		return
+	end
+	local markdown = exporter.markdown(info)
+	bridge.run({ op = "save", root = root, title = info.title, markdown = markdown }, function(result, err, next_cx)
+		if result and next_cx then
+			next_cx:toast("success", "Canvas saved as Obsidian note", result.path)
+		else failure(next_cx, err) end
+	end)
+end
+
+tern.command({
+	id = "save_whiteboard", title = "Obsidian: Save whiteboard as note", icon = "file",
+	run = function(cx)
+		local state = cx.whiteboard:read(nil, { max_shapes = 2000 })
+		if state.more > 0 then
+			cx:toast("error", "Whiteboard exceeds export limit", "Select a board with at most 2000 shapes")
+			return
+		end
+		local children: { Node } = {}
+		for _, shape in state.shapes do
+			if shape.text and shape.text ~= "" then
+				table.insert(children, tern.ui.md(shape.text))
+			elseif shape.type == "arrow" or shape.type == "line" then
+				table.insert(children, tern.ui.text((shape.from_shape or "point") .. " → " .. (shape.to_shape or "point")))
+			end
+		end
+		local markdown = exporter.markdown({ title = "Tern Whiteboard", view = tern.ui.col(children) })
+		local function save(root: string)
+			bridge.run({ op = "save", root = root, title = "Tern Whiteboard", markdown = markdown }, function(result, err, next_cx)
+				if result and next_cx then next_cx:toast("success", "Whiteboard saved as note", result.path) else failure(next_cx, err) end
+			end)
+		end
+		local root = root_of(cx)
+		if root then save(root) else
+			cx:prompt({ placeholder = "Destination Obsidian vault folder" }):next(function(value, err, next_cx)
+				if value then save(value) else failure(next_cx, err) end
+			end)
+		end
+	end,
+})
+
+tern.command({
+	id = "save_canvas", title = "Obsidian: Save Tern canvas as note", icon = "file",
+	run = function(cx)
+		local pane = cx.session:focused()
+		local canvases = cx.canvas:list()
+		local choices: { PickItem } = {}
+		for _, info in canvases do table.insert(choices, { label = info.title, pane = info.pane, current = pane == info.pane }) end
+		if #choices == 0 then
+			cx:toast("error", "No Tern canvas panels are open")
+			return
+		end
+		cx:pick({ items = choices, placeholder = "Canvas to save" }):next(function(item, err, pick_cx)
+			if item == nil or pick_cx == nil then
+				failure(pick_cx, err)
+				return
+			end
+			local root = root_of(pick_cx)
+			if root then save_canvas(pick_cx, item.pane :: number, root) else
+				pick_cx:prompt({ placeholder = "Destination Obsidian vault folder" }):next(function(value, prompt_err, prompt_cx)
+					if value and prompt_cx then save_canvas(prompt_cx, item.pane :: number, value) else failure(prompt_cx, prompt_err) end
+				end)
+			end
+		end)
+	end,
+})
+
+tern.command({
+	id = "import_whiteboard", title = "Obsidian: Import canvas as whiteboard", icon = "layout",
+	run = function(cx)
+		cx:prompt({ placeholder = "Absolute path to .canvas file" }):next(function(value, err, next_cx)
+			if value == nil or next_cx == nil then
+				failure(next_cx, err)
+				return
+			end
+			local ok, doc = pcall(function() return tern.json.decode(tern.fs.read(value, 4 * 1024 * 1024)) end)
+			if not ok then
+				next_cx:toast("error", "Invalid JSON Canvas", tostring(doc))
+				return
+			end
+			local edits = canvasmod.to_whiteboard(doc.nodes or {}, doc.edges or {})
+			next_cx.whiteboard:open():next(function(id, open_err, board_cx)
+				if id and board_cx then board_cx.whiteboard:edit(id, edits :: any) else failure(board_cx, open_err) end
+			end)
+		end)
+	end,
+})

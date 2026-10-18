@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Cache & logs
+*.log
+.cache/
+
+# Local tests / scratch
+*.tmp
+*.bak

@@ -23,6 +23,51 @@ local function hydrate(node: any): Node
 	return node
 end
 
+local MIME: { [string]: string } = {
+	png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg", gif = "image/gif",
+	webp = "image/webp", svg = "image/svg+xml", bmp = "image/bmp", avif = "image/avif",
+}
+
+-- `tern.ui.md` cannot load a local image, so a marker becomes an image node
+-- backed by bytes sent through cx:blob.
+local function inline_images(node: any, blobs: { [string]: string }): any
+	if type(node) ~= "table" then
+		return node
+	end
+	if node.k == "md" and node.p and type(node.p.text) == "string" then
+		local text = node.p.text
+		if not text:find("![[tern-image:", 1, true) then
+			return node
+		end
+		local rows: { Node } = {}
+		local rest = text
+		while true do
+			local from, to, index = rest:find("!%[%[tern%-image:(%d+)%]%]")
+			if from == nil then
+				if rest ~= "" then
+					table.insert(rows, tern.ui.md(rest))
+				end
+				break
+			end
+			if from > 1 then
+				table.insert(rows, tern.ui.md(rest:sub(1, from - 1)))
+			end
+			local blob = blobs[index :: string]
+			if blob then
+				table.insert(rows, tern.ui.node("image", { blob = blob, alt = "Obsidian image", max = { h = "40lines" } }))
+			end
+			rest = rest:sub((to :: number) + 1)
+		end
+		return tern.ui.col(rows)
+	end
+	if node.c then
+		for i, child in node.c do
+			node.c[i] = inline_images(child, blobs)
+		end
+	end
+	return node
+end
+
 local function load(state: State, cx: BlockCx)
 	state.loading = true
 	state.error = nil
@@ -40,7 +85,16 @@ local function load(state: State, cx: BlockCx)
 		state.loading = false
 		state.error = err
 		if result then
-			state.view = hydrate(result.view)
+			local blobs: { [string]: string } = {}
+			for _, image in result.images or {} do
+				local ok, bytes = pcall(tern.fs.read, image.path)
+				local mime = MIME[(image.rel:match("%.([%w]+)$") or ""):lower()]
+				if ok and mime then
+					-- The helper numbers the markers; send them under that number.
+					blobs[image.key:gsub("^img", "")] = cx:blob(bytes, mime)
+				end
+			end
+			state.view = inline_images(hydrate(result.view), blobs)
 			state.title = result.title
 		end
 		cx:render()

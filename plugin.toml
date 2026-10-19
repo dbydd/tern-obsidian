@@ -6,6 +6,7 @@ description = "Obsidian vault compatibility: notes, wikilinks, properties, tags,
 icon = "file"
 host = "host.luau"
 window = "window.luau"
+styles = ["obsidian.css"]
 
 [[blocks]]
 id = "note"

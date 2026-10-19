@@ -135,17 +135,24 @@ export async function findVault(start) {
 
 async function filesIn(root, vaultConfig) {
   const files = [];
+  const excluded = [];
   async function walk(dir) {
     for (const entry of await readdir(path.join(root, dir), { withFileTypes: true })) {
       if (entry.name.startsWith('.') || skipped.has(entry.name)) continue;
       const rel = dir ? dir + '/' + entry.name : entry.name;
-      if (vaultConfig && vaultConfig.isIgnored(rel)) continue;
+      // Excluded files stay out of the picker and Bases, but Obsidian still
+      // resolves links that point at them, so they are listed separately.
+      if (vaultConfig && vaultConfig.isIgnored(rel)) {
+        if (entry.isDirectory()) await walk(rel);
+        else if (entry.isFile()) excluded.push(rel);
+        continue;
+      }
       if (entry.isDirectory()) await walk(rel);
       else if (entry.isFile()) files.push(rel);
     }
   }
   await walk('');
-  return files.sort();
+  return { files: files.sort(), excluded: excluded.sort() };
 }
 
 async function mapLimit(values, limit, fn) {
@@ -170,7 +177,8 @@ export async function indexVault(root, cacheDir, refresh = false) {
   }
   const entries = {}, warnings = [];
   let reread = 0;
-  const notes = await mapLimit(await filesIn(root, vaultConfig), 16, async rel => {
+  const listing = await filesIn(root, vaultConfig);
+  const notes = await mapLimit(listing.files, 16, async rel => {
     const absolute = path.join(root, rel);
     let info;
     try { info = await stat(absolute); } catch { return null; }
@@ -219,6 +227,16 @@ export async function indexVault(root, cacheDir, refresh = false) {
     return note;
   });
   const found = notes.filter(Boolean);
+  // Excluded files stay linkable but carry no parsed metadata, so a link into
+  // `raw/` still resolves without paying to parse thousands of archives.
+  for (const rel of listing.excluded) {
+    const name = path.basename(rel, path.extname(rel));
+    found.push({
+      rel, name, ext: path.extname(rel).slice(1).toLowerCase(),
+      props: {}, tags: [], aliases: [], links: [], embeds: [], headings: [],
+      excluded: true,
+    });
+  }
   if (cachePath) {
     await mkdir(cacheDir, { recursive: true });
     const temporary = cachePath + '.' + process.pid;
@@ -282,8 +300,10 @@ export function noteHref(root, rel, anchor = '') {
 }
 const escapeLabel = value => String(value).replace(/[\\[\]]/g, '\\$&');
 
+const IMAGE_EXT = /^(png|jpg|jpeg|gif|webp|svg|bmp|avif|tiff|heic)$/i;
+
 async function convertMarkdown(body, ctx, stack = []) {
-  const ast = parser.parse(body), edits = [], wikiRanges = [], refs = [];
+  const ast = parser.parse(body), edits = [], wikiRanges = [], refs = [], images = [];
   const snippets = [];
   visit(ast, (item, _index, parent) => {
     if (item.type === 'code' && item.lang === 'base') {
@@ -309,8 +329,14 @@ async function convertMarkdown(body, ctx, stack = []) {
       if (!resolved.note) return;
       const href = ctx.href(resolved.note.rel, resolved.anchor);
       const label = item.type === 'image' ? item.alt || resolved.note.name : toString(item);
-      const url = item.type === 'image' ? pathToFileURL(path.join(ctx.root, resolved.note.rel)).href : href;
-      edits.push({ a: item.position.start.offset, b: item.position.end.offset, value: `${item.type === 'image' ? '!' : ''}[${escapeLabel(label)}](${url})` });
+      // `tern.ui.md` never loads a local image, so image references are
+      // gathered for the host to send as blobs and replaced by a marker.
+      if (item.type === 'image' && IMAGE_EXT.test(resolved.note.ext)) {
+        images.push({ key: 'img' + images.length, rel: resolved.note.rel, alt: label });
+        edits.push({ a: item.position.start.offset, b: item.position.end.offset, value: `![[tern-image:${images.length - 1}]]` });
+      } else {
+        edits.push({ a: item.position.start.offset, b: item.position.end.offset, value: `${item.type === 'image' ? '!' : ''}[${escapeLabel(label)}](${href})` });
+      }
     }
   });
   for (const ref of refs) {
@@ -322,10 +348,18 @@ async function convertMarkdown(body, ctx, stack = []) {
       else {
         const source = await readFile(path.join(ctx.root, resolved.note.rel), 'utf8');
         const embeddedBody = selectAnchor(splitFrontmatter(source).body, resolved.anchor);
-        replacement = '\n\n' + await convertMarkdown(embeddedBody, { ...ctx, source: resolved.note.rel }, [...stack, resolved.note.rel]) + '\n\n';
+        const inner = await convertMarkdown(embeddedBody, { ...ctx, source: resolved.note.rel }, [...stack, resolved.note.rel]);
+        // Nested embeds keep the outer image numbering, so offsets stay unique.
+        for (const image of inner.images) {
+          const index = images.length;
+          images.push(image);
+          inner.body = inner.body.replaceAll(`![[tern-image:${image.key}]]`, `![[tern-image:${index}]]`);
+        }
+        replacement = '\n\n' + inner.body + '\n\n';
       }
-    } else if (ref.embedded && /^(png|jpg|jpeg|gif|webp|svg|bmp|avif)$/i.test(resolved.note.ext)) {
-      replacement = `![${escapeLabel(ref.alias || resolved.note.name)}](${pathToFileURL(path.join(ctx.root, resolved.note.rel)).href})`;
+    } else if (ref.embedded && IMAGE_EXT.test(resolved.note.ext)) {
+      images.push({ key: 'img' + images.length, rel: resolved.note.rel, alt: ref.alias || resolved.note.name });
+      replacement = `![[tern-image:${images.length - 1}]]`;
     } else replacement = `[${escapeLabel(ref.alias || ref.target)}](${ctx.href(resolved.note.rel, resolved.anchor)})`;
     edits.push({ a: ref.a, b: ref.b, value: replacement });
   }
@@ -350,7 +384,63 @@ async function convertMarkdown(body, ctx, stack = []) {
     body = body.slice(0, edit.a) + edit.value + body.slice(edit.b);
     last = edit.a;
   }
-  return body;
+  return { body, images };
+}
+
+// Tern's Markdown dialect knows five callout kinds; Obsidian defines about
+// twenty. Map each Obsidian kind onto the closest supported one, and turn
+// the rest into plain quotes. Also drop `%%comments%%` and turn `==text==`
+// into bold, since the renderer has no highlight span.
+const CALLOUTS = {
+  note: 'NOTE', info: 'NOTE', todo: 'NOTE', abstract: 'NOTE', summary: 'NOTE', tldr: 'NOTE', quote: 'NOTE', cite: 'NOTE',
+  tip: 'TIP', hint: 'TIP', success: 'TIP', check: 'TIP', done: 'TIP',
+  important: 'IMPORTANT',
+  warning: 'WARNING', caution: 'WARNING', attention: 'WARNING',
+  danger: 'CAUTION', error: 'CAUTION', bug: 'CAUTION', failure: 'CAUTION', fail: 'CAUTION', missing: 'CAUTION',
+};
+
+function normalizeObsidian(text) {
+  const lines = text.split('\n');
+  let fence = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fenceMatch = line.match(/^\s*(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      if (fence == null) fence = fenceMatch[1][0];
+      else if (fenceMatch[1][0] === fence) fence = null;
+      continue;
+    }
+    if (fence != null) continue;
+    const callout = line.match(/^(\s*>\s*)\[!([\w-]+)\]([+-]?)\s*(.*)$/);
+    if (callout) {
+      const mapped = CALLOUTS[callout[2].toLowerCase()];
+      // Tern only opens a callout when the marker is alone on its line, so an
+      // Obsidian inline title moves to the next body line.
+      if (mapped) {
+        lines[i] = `${callout[1]}[!${mapped}]`;
+        if (callout[4]) {
+          lines.splice(i + 1, 0, `${callout[1]}${callout[4]}`);
+          i++;
+        }
+      } else {
+        lines[i] = callout[1] + callout[4];
+      }
+      continue;
+    }
+    lines[i] = stripInlineObsidian(line);
+  }
+  return lines.join('\n');
+}
+
+// Handles `%%hidden%%` and `==marked==` outside inline code spans.
+function stripInlineObsidian(line) {
+  const parts = line.split(/(`+[^`]*`+)/);
+  return parts.map((part, i) => {
+    if (i % 2 === 1) return part;
+    return part
+      .replace(/%%[\s\S]*?%%/g, '')
+      .replace(/==([^=\n]+)==/g, '**$1**');
+  }).join('');
 }
 
 export function selectAnchor(body, anchor) {
@@ -393,18 +483,50 @@ export async function renderNote(index, rel, anchor = '') {
   const ctx = { root: index.root, index, source: rel, href };
   const sections = [];
   if (Object.keys(props).length) {
-    const rows = Object.entries(props).map(([key, value]) => {
-      let cell = typeof value === 'object' ? JSON.stringify(value) : String(value);
-      if (typeof value === 'string' && /^\[\[.*\]\]$/.test(value)) {
-        const target = resolveTarget(index, value.slice(2, -2), rel);
-        if (target.note) cell = [{ t: value.slice(2, -2), href: href(target.note.rel, target.anchor) }];
+    // One property value as a span list. `kv` renders a span list inline, so
+    // separate values explicitly instead of letting them run together.
+    const valueSpans = value => {
+      const one = item => {
+        if (typeof item === 'string' && /^\[\[.*\]\]$/.test(item)) {
+          const inner = item.slice(2, -2);
+          const target = resolveTarget(index, inner, rel);
+          return [{ t: inner, href: target.note ? href(target.note.rel, target.anchor) : '#', s: 'accent' }];
+        }
+        // A property may hold a Markdown link, as `resource` does in this vault.
+        if (typeof item === 'string') {
+          const markdownLink = item.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+          if (markdownLink) {
+            const target = resolveTarget(index, markdownLink[2], rel);
+            // An unresolved vault path still names a real directory, so link
+            // the absolute location rather than echoing the raw target.
+            return [{ t: markdownLink[1], href: target.note ? href(target.note.rel, target.anchor) : path.join(index.root, markdownLink[2]), s: 'accent' }];
+          }
+        }
+        if (typeof item === 'string') return [{ t: item }];
+        if (item === null || typeof item !== 'object') return [{ t: String(item) }];
+        return [{ t: JSON.stringify(item) }];
+      };
+      if (!Array.isArray(value)) return one(value);
+      const spans = [];
+      for (const item of value) {
+        if (spans.length) spans.push({ t: ', ', s: 'dim' });
+        spans.push(...one(item));
       }
-      return [key, cell];
+      return spans.length ? spans : [{ t: '', s: 'dim' }];
+    };
+    const items = Object.entries(props).map(([key, value]) => {
+      return { k: [{ t: key, s: 'muted' }], v: valueSpans(value) };
     });
-    sections.push(section('Properties', [node('table', { cols: [{ id: 'property', head: 'Property' }, { id: 'value', head: 'Value' }], rows })]));
+    sections.push(section('Properties', [node('kv', { items })]));
   }
-  if (note.tags.length) sections.push(section('Tags', note.tags.map(tag => linkText('#' + tag, 'obsidian://tern?' + new URLSearchParams({ root: index.root, tag })))));
-  const converted = await convertMarkdown(selectAnchor(body, anchor), ctx, [rel]);
+  if (note.tags.length) {
+    const tags = section('Tags', note.tags.map(tag => linkText('#' + tag, 'obsidian://tern?' + new URLSearchParams({ root: index.root, tag }))));
+    tags.p = { head: 'Tags', role: 'tags' };
+    sections.push(tags);
+  }
+  const selected = selectAnchor(body, anchor);
+  const convertedResult = await convertMarkdown(selected, ctx, [rel]);
+  const converted = normalizeObsidian(convertedResult.body);
   const marks = [];
   visit(parser.parse(converted), item => {
     if (item.type === 'link' && item.url.startsWith('obsidian://')) marks.push({ t: toString(item), href: item.url });
@@ -413,9 +535,17 @@ export async function renderNote(index, rel, anchor = '') {
   const outgoing = unique(note.links.map(target => resolveTarget(index, target, rel)).filter(r => r.note).map(r => JSON.stringify([r.note.rel, r.anchor]))).map(v => JSON.parse(v));
   if (outgoing.length) sections.push(section('Links', outgoing.map(([target, mark]) => linkText(target + (mark ? '#' + mark : ''), href(target, mark)))));
   if (!anchor && note.headings.length) sections.push(section('Outline', note.headings.map(h => linkText('  '.repeat(h.level - 1) + h.title, href(rel, h.title)))));
-  const backlinks = index.notes.filter(n => n.links.some(target => resolveTarget(index, target, n.rel).note?.rel === rel));
+  const backlinks = index.notes.filter(n => !n.excluded && n.links.some(target => resolveTarget(index, target, n.rel).note?.rel === rel));
   if (backlinks.length) sections.push(section('Backlinks', backlinks.map(n => linkText(n.rel, href(n.rel)))));
-  return { title: note.name, view: node('col', null, sections), root: index.root, rel, tags: note.tags, warnings: index.warnings };
+  return {
+    title: note.name,
+    view: node('col', null, sections),
+    root: index.root,
+    rel,
+    tags: note.tags,
+    warnings: index.warnings,
+    images: convertedResult.images.map(image => ({ ...image, path: path.join(index.root, image.rel) })),
+  };
 }
 
 async function knownVaults() {
@@ -449,7 +579,7 @@ export async function dispatch(request) {
   }
   if (!root) throw new Error('No .obsidian directory above ' + (start || 'current directory'));
   const index = await indexVault(root, request.cache, request.refresh);
-  if (request.op === 'index') return { root, count: index.notes.length, notes: index.notes.filter(n => ['md', 'base', 'canvas'].includes(n.ext)).map(n => ({ rel: n.rel, name: n.name, ext: n.ext, tags: n.tags, aliases: n.aliases })), warnings: index.warnings, reread: index.reread };
+  if (request.op === 'index') return { root, count: index.notes.filter(n => !n.excluded).length, notes: index.notes.filter(n => !n.excluded && ['md', 'base', 'canvas'].includes(n.ext)).map(n => ({ rel: n.rel, name: n.name, ext: n.ext, tags: n.tags, aliases: n.aliases })), warnings: index.warnings, reread: index.reread };
   if (request.op === 'resolve') {
     const resolved = resolveTarget(index, request.target, request.from || '');
     if (!resolved.note) throw new Error((resolved.candidates?.length ? 'Ambiguous link: ' + resolved.candidates.join(', ') : 'Missing link: ' + request.target));
@@ -459,20 +589,35 @@ export async function dispatch(request) {
     if (resolved.anchor && !line) throw new Error('Anchor not found: #' + resolved.anchor);
     return { root, rel: resolved.note.rel, path: path.join(root, resolved.note.rel), line, anchor: resolved.anchor, ext: resolved.note.ext };
   }
-  if (request.op === 'tag') return { root, view: node('col', null, [section('#' + request.tag, index.notes.filter(n => n.tags.some(t => norm(t) === norm(request.tag) || norm(t).startsWith(norm(request.tag) + '/'))).map(n => linkText(n.rel, noteHref(root, n.rel))))]), title: '#' + request.tag };
+  if (request.op === 'tag') return { root, view: node('col', null, [section('#' + request.tag, index.notes.filter(n => !n.excluded && n.tags.some(t => norm(t) === norm(request.tag) || norm(t).startsWith(norm(request.tag) + '/'))).map(n => linkText(n.rel, noteHref(root, n.rel))))]), title: '#' + request.tag };
   const rel = request.rel || slash(path.relative(root, request.path));
   if (!index.notes.some(n => n.rel === rel)) throw new Error('File is outside the vault or unavailable: ' + rel);
-  if (rel.toLowerCase().endsWith('.base')) return { root, rel, title: path.basename(rel), view: node('col', null, [renderBase(Bun.YAML.parse(await readFile(path.join(root, rel), 'utf8')), { root, index, source: rel, href: (r, a) => noteHref(root, r, a) })]) };
+  if (rel.toLowerCase().endsWith('.base')) {
+    const visible = { ...index, notes: index.notes.filter(n => !n.excluded) };
+    return { root, rel, title: path.basename(rel), view: node('col', null, [renderBase(Bun.YAML.parse(await readFile(path.join(root, rel), 'utf8')), { root, index: visible, source: rel, href: (r, a) => noteHref(root, r, a) })]) };
+  }
   if (rel.toLowerCase().endsWith('.canvas')) {
     const doc = JSON.parse(await readFile(path.join(root, rel), 'utf8'));
     const children = [];
+    const images = [];
     for (const n of doc.nodes || []) {
       const label = n.label || n.file || n.url || n.id;
-      let content = n.type === 'text' ? md(await convertMarkdown(n.text || '', { root, index, source: rel, href: (r, a) => noteHref(root, r, a) }, [rel])) : n.type === 'file' ? linkText(n.file, noteHref(root, n.file, (n.subpath || '').replace(/^#/, ''))) : n.type === 'link' ? linkText(n.url, n.url) : text(n.label || 'Group');
+      let content;
+      if (n.type === 'text') {
+        const inner = await convertMarkdown(n.text || '', { root, index, source: rel, href: (r, a) => noteHref(root, r, a) }, [rel]);
+        for (const image of inner.images) images.push(image);
+        content = md(normalizeObsidian(inner.body));
+      } else if (n.type === 'file') {
+        content = linkText(n.file, noteHref(root, n.file, (n.subpath || '').replace(/^#/, '')));
+      } else if (n.type === 'link') {
+        content = linkText(n.url, n.url);
+      } else {
+        content = text(n.label || 'Group');
+      }
       children.push(section(label, [text(`Position ${n.x}, ${n.y} · ${n.width} × ${n.height}`), content]));
     }
     if (doc.edges?.length) children.push(section('Connections', doc.edges.map(e => text(`${e.fromNode} → ${e.toNode}${e.label ? ': ' + e.label : ''}`))));
-    return { root, rel, title: path.basename(rel), view: node('col', null, children), canvas: doc };
+    return { root, rel, title: path.basename(rel), view: node('col', null, children), canvas: doc, images: images.map(image => ({ ...image, path: path.join(root, image.rel) })) };
   }
   return renderNote(index, rel, request.anchor || '');
 }

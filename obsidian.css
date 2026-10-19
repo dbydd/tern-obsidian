@@ -1,0 +1,47 @@
+/*
+ * Reader styling for plugin.obsidian.note.
+ *
+ * Obsidian reads like a document, not a dashboard: the prose gets a centred
+ * measure, roomy line height, and headings that differ by size. Tern's own
+ * markdown block is already close, so this only narrows and spaces it.
+ */
+
+.sf-main[data-surface='plugin.obsidian.note'] .sf-col {
+	padding: 4px 8px 24px;
+	line-height: 1.6;
+}
+
+/*
+ * The rendered note column: a readable measure, centred in a wide pane.
+ * `width: 100%` keeps the box inside a narrow pane; without it a flex item
+ * sizes to its content, and auto margins then centre an overflow sideways.
+ */
+.sf-main[data-surface='plugin.obsidian.note'] .sf-col > .sf-col,
+.sf-main[data-surface='plugin.obsidian.note'] .sf-md {
+	width: 100%;
+	max-width: 760px;
+	margin-left: auto;
+	margin-right: auto;
+}
+
+/* Section heads (Properties, Tags, Links, Outline, Backlinks) stay quiet. */
+.sf-main[data-surface='plugin.obsidian.note'] .sf-section-head {
+	margin-bottom: 4px;
+}
+
+/* Properties: a compact key column, values wrap instead of being cut. */
+.sf-main[data-surface='plugin.obsidian.note'] .sf-kv {
+	font-size: 0.95em;
+}
+
+.sf-main[data-surface='plugin.obsidian.note'] .sf-kv .sf-t-muted {
+	padding-right: 12px;
+}
+
+/* Tag chips sit on one wrapped line rather than one per row. */
+.sf-main[data-surface='plugin.obsidian.note'] .sf-section[data-role='tags'] .sf-text {
+	display: inline-block;
+	padding: 1px 8px 1px 0;
+}
+
+

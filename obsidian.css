@@ -44,4 +44,28 @@
 	padding: 1px 8px 1px 0;
 }
 
+/*
+ * Filters page: the prefs kind draws the whole settings page (nav rail,
+ * document, close button), so this only bounds it to a sheet-sized measure
+ * inside the floating pane.
+ */
+
+.sf-main[data-surface='plugin.obsidian.filters'],
+.sf-main[data-surface='plugin.obsidian.hindsight'] {
+	padding: 14px 16px;
+	box-sizing: border-box;
+	min-width: 0;
+	overflow: auto;
+}
+
+.sf-main[data-surface='plugin.obsidian.filters'] .sf-prefs,
+.sf-main[data-surface='plugin.obsidian.hindsight'] .sf-prefs {
+	width: 100%;
+	max-width: 640px;
+	max-height: 100%;
+	min-width: 0;
+	margin-left: auto;
+	margin-right: auto;
+}
+
 

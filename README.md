@@ -28,8 +28,56 @@ tern plugin list
 | Obsidian: Save Tern canvas as note | 选择 Tern UI canvas，将文字、Markdown、表格和代码保存到仓库 `Tern Notes/`。同名文件自动加数字后缀。 |
 | Obsidian: Save whiteboard as note | 将当前白板的文字和连接保存为 Markdown 笔记。 |
 | Obsidian: Import canvas as whiteboard | 将 JSON Canvas 节点和连接导入 Tern 白板。 |
+| Obsidian: Edit vault filters | 按仓库编辑 allow/deny 索引筛选，面板浮在当前 pane 右下角，已打开时复用。 |
+| Obsidian: Hindsight settings | 按仓库配置 Hindsight 孪生知识库的绑定、同步范围，并查看或启动同步作业。 |
 
 阅读块底部的 **Edit source** 打开原始文件，**Refresh** 重新读取笔记。键盘 `e`、`r` 对应这两个操作。源码编辑后的刷新会读取新内容。`tern open` 的 CLI 打开保留 Tern 原生文件编辑行为，适合 `EDITOR='tern open --wait'`。
+
+## 仓库筛选
+
+`Obsidian: Edit vault filters` 把按仓库保存的筛选面板浮在当前 pane 的右下角；已打开时复用同一个面板，不再叠标签页。面板是 Tern 的 `prefs` 设置页，限宽 640px、内边距 14px/16px。点 `Pattern` 输入行后 Enter 加入当前目标列表；`Add to` 用 Allow/Deny 分段控件切换目标，列表每条右侧 `Remove` 删除。页头显示当前可见文件数。
+
+| 列表 | 语义 |
+| --- | --- |
+| Allow | 非空时只列出匹配的文件；为空时列出全部 |
+| Deny | 匹配的文件不列出；同时命中两个列表时 Deny 优先 |
+
+模式匹配仓库相对路径。`**` 跨目录，`*` 和 `?` 只匹配一段路径。不含 `/` 的模式同时匹配文件名和目录前缀，所以 `raw` 覆盖 `raw/…`，`*.canvas` 覆盖任意深度的 canvas。
+
+筛选只作用于索引：文件选择器、Bases 表格、标签、出链与反向链接，以及 Carly 的 `find`、`links`、`vault`。被筛掉的文件仍能用 `read` 和文件编辑器打开，与 Obsidian 自身的 ignore 过滤一致。改动在下一次打开或 Refresh 索引时生效。
+
+配置写在仓库内 `<vault>/.obsidian/tern-obsidian/settings.json` 的 `filters` 键，随仓库走，不进 Tern 的 kv。
+
+## Carly 读取接口
+
+窗口半边注册五个只读导出，Carly 在 `lua` 工具里直接调用，不必起子进程或自己跑索引。根目录默认取当前焦点 pane 所属的仓库；每个导出都可以显式传 `root`，路径来自 `vaults()`。
+
+| 调用 | 返回 |
+| --- | --- |
+| `await(plugins.obsidian.vaults())` | 焦点 pane 的仓库根（没有则为 nil），以及 Obsidian 记录的全部仓库路径 |
+| `await(plugins.obsidian.vault(root?))` | 仓库根、笔记数、前 20 条索引警告 |
+| `await(plugins.obsidian.find(query, limit?, root?))` | 对路径、文件名、别名、标签做大小写不敏感的子串匹配；`total` 是全部命中数，`matches` 最多 50 条，`limit` 默认 20 |
+| `await(plugins.obsidian.read(rel, from?, lines?, root?))` | 按行分页读正文；`rel` 可以是仓库相对路径或仓库内的绝对路径；默认 200 行，单页最多 12 KB，`next` 是下一页的起始行 |
+| `await(plugins.obsidian.links(rel, root?))` | 出链与反向链接，各最多 80 条；被 ignore 过滤掉的文件 `excluded` 为 true，自身出链不解析 |
+
+`tern.carly.context` 同时登记一条提示，让 Carly 看到当前 pane 属于哪个仓库。五个导出只读：改文件由 Carly 自己的文件工具完成，或交给专门管仓库的 agent。
+
+## Hindsight 孪生知识库
+
+`Obsidian: Hindsight settings` 打开与筛选面板同样式的设置页：绑定（API URL、bank、key）、同步范围（include/exclude、文档 ID 前缀、编辑后自动同步、observation scopes）、同步状态（tracked/inherited 文档数、最近作业、手动 Sync）。
+
+配置与状态全部绑定仓库，不写 Tern 的 kv：
+
+| 路径 | 内容 |
+| --- | --- |
+| `<vault>/.obsidian/plugins/hindsight/data.json` | Obsidian 插件自己的设置与 `syncIndex`，只读继承，Tern 从不写回 |
+| `<vault>/.obsidian/tern-obsidian/settings.json` | Tern 的覆盖项（`hindsight`）与仓库筛选（`filters`） |
+| `<vault>/.obsidian/tern-obsidian/hindsight/<binding>/` | 该绑定的索引、待确认 operation、作业历史；`binding` 是 `root\|endpoint\|bank\|prefix` 的短哈希 |
+| `<state>/plugin-data/obsidian/hindsight/<binding>/` | 仅锁与心跳（`lock.json`、`watch.lock.json`），机器本地，不随仓库同步 |
+
+同步只选择 Markdown，参考 include/exclude 与 Tern allow/deny 取交集。参考插件的 syncIndex 只读用于跳过已入库内容；Tern 只删除自己 retain 过的文档。作业由 Tern 进程持有，prepare 立即返回 job_id，`submitted` 是服务端受理、`ingested` 是 operation completed。失败、中断与重试都保留在作业记录里。
+
+Carly 侧新增七个导出：`hindsight_status`、`hindsight_sync`、`hindsight_recall`、`hindsight_reflect`、`mental_model`、`knowledge`、`hindsight_config`，签名与语义见 `carly-hindsight-contract.md`。召回与反思的每条事实带引用 ID 与来源（current/stale/excluded/unresolved），聚合 observation 展开到原始 fact。
 
 ## 格式支持
 
@@ -51,7 +99,19 @@ Bases 目前提供读取视图。汇总、完整 Obsidian 公式函数集、第�
 
 ## 验证
 
-实现通过本机 SDK 的 `luau-lsp analyze`。实际 Tern 窗口验证覆盖：包含数千篇笔记的真实仓库、`.base` 多维表格、Open file 搜索选择、wikilink 点击跳转、标题/块引用解析、属性和标签显示，以及 Tern canvas 导出后读取 Markdown 内容。
+实现通过本机 SDK 的 `luau-lsp analyze`。实际 Tern 窗口验证覆盖：包含数千篇笔记的真实仓库、`.base` 多维表格、Open file 搜索选择、wikilink 点击跳转、标题/块引用解析、属性和标签显示、Tern canvas 导出后读取 Markdown 内容，以及筛选与 Hindsight 两个 `prefs` 面板。
+
+Hindsight 侧：真实仓库（Alexandria，`obsidian-alexandria`）完成只读验收，`baselineInherited` 计入 3487 条继承文档，recall 与 reflect 的引用可回读原文；隔离仓库（`tern-obsidian-test`）完成增、改、删、故障 ECONNREFUSED 保留 failed、同 job_id 幂等重试、中断后台续跑，以及 `syncOnEdit=false` 时 watcher 返回 disabled。
+
+## 更新日志
+
+### 未发布
+
+- Carly 读取接口：`vaults`、`vault`、`find`、`read`、`links`，全部只读，根目录可取焦点 pane 所属仓库。
+- 仓库筛选：`obsidian.filters` 块用 `prefs` 设置页编辑 allow/deny glob，配置写在仓库内 `.obsidian/tern-obsidian/settings.json`。
+- Hindsight 孪生知识库：`obsidian.hindsight` 设置页、后台同步作业引擎，以及 `hindsight_status`、`hindsight_sync`、`hindsight_recall`、`hindsight_reflect`、`mental_model`、`knowledge`、`hindsight_config` 七个 Carly 导出。
+- 仓库根目录解析兜底：焦点 pane 不在仓库内时改用最近使用的仓库，再退回 Obsidian 的仓库列表选择器。
+- 修复：空 cwd 不再被当成仓库路径向下查找；浮动面板复用已打开的 pane 而不再叠标签页。
 
 ## 参考
 

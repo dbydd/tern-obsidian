@@ -13,3 +13,15 @@ id = "note"
 title = "Obsidian Note"
 files = ["*.md", "*.base", "*.canvas"]
 palette = false
+
+[[blocks]]
+id = "filters"
+title = "Obsidian Vault Filters"
+icon = "funnel"
+palette = false
+
+[[blocks]]
+id = "hindsight"
+title = "Obsidian Hindsight"
+icon = "database"
+palette = false

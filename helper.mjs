@@ -10,6 +10,8 @@ import remarkWikiLink from 'remark-wiki-link';
 import { toString } from 'mdast-util-to-string';
 import { visit } from 'unist-util-visit';
 import { renderBase } from './bases.mjs';
+import * as hindsight from './hindsight.mjs';
+import { matchesFilter } from './vault-filters.mjs';
 
 const parser = unified().use(remarkParse).use(remarkGfm).use(remarkWikiLink, { aliasDivider: '|' });
 const skipped = new Set(['.obsidian', '.git', '.trash', 'node_modules', '.smart-env', '.space', '.copilot', '.pi', '.pi-subagents', '.agents', '.claude', '.opencode']);
@@ -168,6 +170,17 @@ async function mapLimit(values, limit, fn) {
   return result;
 }
 
+// The `filters` block keeps these in the vault's own settings file.
+async function vaultFilters(cacheDir, root) {
+  let store;
+  try { store = JSON.parse(await readFile(path.join(root, '.obsidian/tern-obsidian/settings.json'), 'utf8')); } catch { return null; }
+  const entry = store?.filters;
+  if (!entry) return null;
+  const allow = asList(entry.allow).filter(value => typeof value === 'string' && value.trim() !== '');
+  const deny = asList(entry.deny).filter(value => typeof value === 'string' && value.trim() !== '');
+  return allow.length || deny.length ? { allow, deny } : null;
+}
+
 export async function indexVault(root, cacheDir, refresh = false) {
   const vaultConfig = await loadVaultConfig(root);
   const cachePath = cacheDir && path.join(cacheDir, 'vault-' + createHash('sha256').update(root).digest('hex').slice(0, 16) + '.json');
@@ -178,7 +191,17 @@ export async function indexVault(root, cacheDir, refresh = false) {
   const entries = {}, warnings = [];
   let reread = 0;
   const listing = await filesIn(root, vaultConfig);
-  const notes = await mapLimit(listing.files, 16, async rel => {
+  // A denied path, or one outside a non-empty allow list, stays linkable but
+  // is not parsed, exactly like Obsidian's own ignore filters.
+  const filters = await vaultFilters(cacheDir, root);
+  const parsed = [], ignored = [...listing.excluded];
+  for (const rel of listing.files) {
+    const denied = filters && filters.deny.some(pattern => matchesFilter(pattern, rel));
+    const allowed = !filters || filters.allow.length === 0 || filters.allow.some(pattern => matchesFilter(pattern, rel));
+    if (denied || !allowed) ignored.push(rel);
+    else parsed.push(rel);
+  }
+  const notes = await mapLimit(parsed, 16, async rel => {
     const absolute = path.join(root, rel);
     let info;
     try { info = await stat(absolute); } catch { return null; }
@@ -229,7 +252,7 @@ export async function indexVault(root, cacheDir, refresh = false) {
   const found = notes.filter(Boolean);
   // Excluded files stay linkable but carry no parsed metadata, so a link into
   // `raw/` still resolves without paying to parse thousands of archives.
-  for (const rel of listing.excluded) {
+  for (const rel of ignored) {
     const name = path.basename(rel, path.extname(rel));
     found.push({
       rel, name, ext: path.extname(rel).slice(1).toLowerCase(),
@@ -572,14 +595,69 @@ export async function dispatch(request) {
     }
     return { path: filename, root };
   }
+  if (request.op === 'vaults') {
+    return { focused: request.root ? await findVault(request.root) : null, known: await knownVaults() };
+  }
   const start = request.path || request.root || request.cwd;
   let root = request.vault && !request.root ? null : await findVault(start);
   if (request.vault && !request.root) {
     for (const candidate of await knownVaults()) if (path.basename(candidate) === request.vault || candidate === request.vault) { root = await findVault(candidate); if (root) break; }
   }
   if (!root) throw new Error('No .obsidian directory above ' + (start || 'current directory'));
+  if (request.op.startsWith('hindsight-')) return hindsight.dispatch(request, root);
+  // Paged text read: the index is not needed, so this stays cheap on a cold cache.
+  if (request.op === 'read') {
+    const given = String(request.rel || '');
+    const rel = path.isAbsolute(given) ? slash(path.relative(root, path.resolve(given))) : slash(given).replace(/^\/+/, '');
+    const absolute = path.resolve(root, rel);
+    if (!absolute.startsWith(root + path.sep)) throw new Error('Path is outside the vault: ' + rel);
+    let source;
+    try { source = await readFile(absolute, 'utf8'); } catch (error) { throw new Error('Cannot read ' + rel + ': ' + error.message); }
+    if (source.includes('\u0000')) throw new Error('Not a text file: ' + rel);
+    const all = source.split(/\r?\n/);
+    const from = Math.max(1, Math.trunc(Number(request.from) || 1));
+    const want = Math.min(2000, Math.max(1, Math.trunc(Number(request.lines) || 200)));
+    const chunk = [];
+    let bytes = 0, at = from - 1;
+    while (at < all.length && chunk.length < want) {
+      const size = Buffer.byteLength(all[at], 'utf8') + 1;
+      if (bytes + size > 12000 && chunk.length > 0) break;
+      chunk.push(all[at]);
+      bytes += size;
+      at++;
+    }
+    return { root, rel, total_lines: all.length, from, lines: chunk.length, next: at < all.length ? at + 1 : null, text: chunk.join('\n') };
+  }
   const index = await indexVault(root, request.cache, request.refresh);
   if (request.op === 'index') return { root, count: index.notes.filter(n => !n.excluded).length, notes: index.notes.filter(n => !n.excluded && ['md', 'base', 'canvas'].includes(n.ext)).map(n => ({ rel: n.rel, name: n.name, ext: n.ext, tags: n.tags, aliases: n.aliases })), warnings: index.warnings, reread: index.reread };
+  if (request.op === 'vault') return { root, count: index.notes.filter(n => !n.excluded).length, warnings: index.warnings.slice(0, 20) };
+  if (request.op === 'find') {
+    const query = norm(String(request.query || ''));
+    const limit = Math.min(50, Math.max(1, Math.trunc(Number(request.limit) || 20)));
+    const matches = [];
+    let total = 0;
+    for (const note of index.notes) {
+      if (note.excluded) continue;
+      if (query && ![note.rel, note.name, ...note.aliases, ...note.tags].some(value => norm(value).includes(query))) continue;
+      total++;
+      if (matches.length < limit) matches.push({ rel: note.rel, name: note.name, ext: note.ext, tags: note.tags.slice(0, 8), aliases: note.aliases.slice(0, 4) });
+    }
+    return { root, total, matches };
+  }
+  if (request.op === 'links') {
+    const given = String(request.rel || '');
+    const rel = path.isAbsolute(given) ? slash(path.relative(root, path.resolve(given))) : slash(given).replace(/^\/+/, '');
+    const note = index.notes.find(n => n.rel === rel);
+    if (!note) throw new Error('Not a vault file: ' + rel);
+    const out = note.links.map(target => resolveTarget(index, target, rel).note?.rel || target + ' (unresolved)');
+    const back = [];
+    for (const other of index.notes) {
+      if (other.excluded || other.rel === rel) continue;
+      if (other.links.some(target => resolveTarget(index, target, other.rel).note?.rel === rel)) back.push(other.rel);
+    }
+    // An ignored file keeps its place in the link graph but has no parsed links of its own.
+    return { root, rel, excluded: Boolean(note.excluded), out: unique(out).slice(0, 80), back: unique(back).slice(0, 80) };
+  }
   if (request.op === 'resolve') {
     const resolved = resolveTarget(index, request.target, request.from || '');
     if (!resolved.note) throw new Error((resolved.candidates?.length ? 'Ambiguous link: ' + resolved.candidates.join(', ') : 'Missing link: ' + request.target));

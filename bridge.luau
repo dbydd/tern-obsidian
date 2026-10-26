@@ -31,6 +31,32 @@ function bridge.run(request: any, callback: (any?, string?, WindowCx?) -> ())
 	end)
 end
 
+function bridge.background(request: any, callback: (any?, string?, WindowCx?) -> ())
+	request.cache = tern.plugin.data
+	tern.process.run({ bun_path(), tern.plugin.dir .. "/helper.mjs" }, {
+		cwd = tern.plugin.dir,
+		stdin = tern.json.encode(request),
+	}, function(result, cx)
+		if result.status ~= 0 then
+			callback(nil, result.stderr, cx)
+			return
+		end
+		local ok, data = pcall(tern.json.decode, result.stdout)
+		if ok then callback(data, nil, cx) else callback(nil, tostring(data), cx) end
+	end)
+end
+
+function bridge.sync(root: string, opts: any, callback: (any?, string?, WindowCx?) -> ())
+	bridge.run({ op = "hindsight-sync", root = root, force = opts and opts.force, job_id = opts and opts.job_id }, function(job, err, cx)
+		if job and job.launch then
+			bridge.background({ op = "hindsight-sync-run", root = root, job_id = job.job_id }, function(_, run_err)
+				if run_err then tern.log.error("Hindsight sync failed", run_err) end
+			end)
+		end
+		callback(job, err, cx)
+	end)
+end
+
 function bridge.encode(value: string): string
 	local encoded = value:gsub("([^%w%-%._~])", function(char)
 		return string.format("%%%02X", string.byte(char))
@@ -60,6 +86,9 @@ function bridge.find(dir: string): string?
 		dir = home .. dir:sub(2)
 	end
 	local at = dir:gsub("/+$", "")
+	if at == "" then
+		return nil
+	end
 	while at ~= "" do
 		if tern.fs.exists(at .. "/.obsidian") then
 			return at

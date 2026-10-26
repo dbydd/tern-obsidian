@@ -2,6 +2,7 @@
 local bridge = require("./bridge")
 local exporter = require("./export")
 local canvasmod = require("./canvas")
+local carly = require("./carly")
 
 local roots: { [number]: string } = {}
 
@@ -10,16 +11,28 @@ local function focused(cx: WindowCx): PaneInfo?
 	return if id then cx.session:pane(id) else nil
 end
 
+-- The vault a pane's cwd sits in, else the last vault this machine opened.
+-- A focused agent or file pane has a cwd outside any vault, and refusing to
+-- open the panel there would be surprising.
+local function remembered(): string?
+	local root = tern.kv.get("last-vault")
+	if type(root) == "string" and root ~= "" and tern.fs.exists(root .. "/.obsidian") then
+		return root
+	end
+	return nil
+end
+
 local function root_of(cx: WindowCx): string?
 	if cx.hosts:current().kind ~= "local" then
 		return nil
 	end
 	local pane = focused(cx)
-	if pane == nil then
-		return nil
-	end
-	return roots[pane.pane] or bridge.find(pane.cwd or "")
+	local root = if pane then roots[pane.pane] or bridge.find(pane.cwd or "") else nil
+	return root or remembered()
 end
+
+carly.register(root_of)
+carly.register_hindsight(root_of)
 
 local function failure(cx: WindowCx?, err: string?)
 	if cx and err then
@@ -28,6 +41,7 @@ local function failure(cx: WindowCx?, err: string?)
 end
 
 local function open_note(cx: WindowCx, root: string, rel: string, anchor: string?)
+	tern.kv.set("last-vault", root)
 	local path = root .. "/" .. rel
 	if rel:lower():match("%.md$") or rel:lower():match("%.base$") or rel:lower():match("%.canvas$") then
 		local pane = cx:new_block("obsidian.note", { path, anchor or "" })
@@ -117,6 +131,92 @@ tern.command({
 				next_cx:toast("success", "Vault indexed", tostring(result.count) .. " files · " .. tostring(#result.warnings) .. " metadata errors")
 			else failure(next_cx, err) end
 		end)
+	end,
+})
+
+local function open_panel(cx: WindowCx, kind: string, root: string)
+	tern.kv.set("last-vault", root)
+	local over = cx.session:focused()
+	local pane: number?
+	for _, info in cx.session:panes() do
+		if info.block == kind then
+			pane = info.pane
+			break
+		end
+	end
+	if pane == nil then
+		pane = cx:new_block(kind, { root }, "beside")
+	end
+	-- An explicit owner needs a split sibling; without one the float takes the
+	-- block that absorbed the new pane's space, which is the pane here.
+	if pane and pane ~= over then
+		cx.layout:float(pane, nil, "br")
+	end
+	if pane then
+		cx.layout:focus(pane)
+	end
+end
+
+local function open_filters(cx: WindowCx, root: string)
+	open_panel(cx, "obsidian.filters", root)
+end
+
+-- Focused pane, then the remembered vault, then Obsidian's own vault list.
+local function pick_vault(cx: WindowCx, done: (WindowCx, string) -> ())
+	bridge.run({ op = "vaults" }, function(result, err, next_cx)
+		if next_cx == nil then
+			return
+		end
+		if result == nil then
+			failure(next_cx, err)
+			return
+		end
+		local known: { string } = result.known or {}
+		if #known == 0 then
+			next_cx:toast("error", "Obsidian", "No Obsidian vault found on this machine")
+			return
+		end
+		if #known == 1 then
+			done(next_cx, known[1])
+			return
+		end
+		local items: { PickItem } = {}
+		for _, path in known do
+			table.insert(items, { label = path:match("([^/]+)$") or path, detail = path, value = path })
+		end
+		next_cx:pick({ items = items, placeholder = "Obsidian vault" }):next(function(item, pick_err, pick_cx)
+			if item and pick_cx then
+				done(pick_cx, item.value :: string)
+			else
+				failure(pick_cx, pick_err)
+			end
+		end)
+	end)
+end
+
+tern.command({
+	id = "filters", title = "Obsidian: Edit vault filters", icon = "funnel",
+	run = function(cx)
+		local root = root_of(cx)
+		if root then
+			open_filters(cx, root)
+		else
+			pick_vault(cx, open_filters)
+		end
+	end,
+})
+
+tern.command({
+	id = "hindsight", title = "Obsidian: Hindsight settings", icon = "database",
+	run = function(cx)
+		local root = root_of(cx)
+		if root then
+			open_panel(cx, "obsidian.hindsight", root)
+		else
+			pick_vault(cx, function(next_cx, at)
+				open_panel(next_cx, "obsidian.hindsight", at)
+			end)
+		end
 	end,
 })
 

@@ -98,12 +98,14 @@ Carly 侧新增七个导出：`hindsight_status`、`hindsight_sync`、`hindsight
 Bases 目前提供读取视图。汇总、完整 Obsidian 公式函数集、第三方视图和 Dataview 查询不在实现中。不支持的表达式会在对应视图显示错误。JSON Canvas 卡片阅读不提供空间编辑，白板导入不保留全部视觉样式。白板转 Markdown 保留文字与连接，不保留图形几何。
 
 窗口命令和文件选择增强用于本地仓库。远程文件打开沿用 Tern 的原生处理。OneDrive 等云盘尚未下载的文件可能读取失败，阅读块会显示具体错误。非法 YAML 属性不会被自动改写。
+通过符号链接路径打开笔记时，插件将文件解析为真实路径后再确定仓库相对位置。
 
 ## 验证
 
 实现通过本机 SDK 的 `luau-lsp analyze`。实际 Tern 窗口验证覆盖：包含数千篇笔记的真实仓库、`.base` 多维表格、Open file 搜索选择、wikilink 点击跳转、标题/块引用解析、属性和标签显示、Tern canvas 导出后读取 Markdown 内容，以及筛选与 Hindsight 两个 `prefs` 面板。
 
 短链接验证覆盖唯一文件名、重复别名、不同目录重名、同目录优先、路径和锚点。Alexandria 的 BGAI 精读报告经 `renderNote` 渲染后无歧义提示。底部按钮在 396 × 573、396 × 1240 和 813 × 595 px 阅读区中完整显示，两个操作均通过点击验证。匹配排序的固定样例连续长度为 9、9、6、1，同分重复运行 10 次保持一致；真实选择器中 `attention` 返回 89 个结果。
+路径验证覆盖真实 OneDrive 符号链接别名路径、CloudStorage 物理路径、不同工作目录下相对路径打开与库外路径拒绝。
 
 含图片的报告拆分成 Markdown 片段时保留 `marks` 链接元数据。实际界面中，BGAI 精读报告的“BGAI 摘要”生成带目标地址的 `.sf-link`，Command 点击后打开 `papers/abstracts/broadcast-gated-attention-abstract.md`，显示对应论文标题和官方摘要。
 
@@ -114,6 +116,7 @@ Hindsight 侧：真实仓库（Alexandria，`obsidian-alexandria`）完成只读
 ### 未发布
 
 - 修复短 wikilink 的重复候选，保留不同文件重名时的歧义提示。
+- 修复通过软链接路径打开笔记时被误判为库外文件的缺陷。
 - 修复图片分段丢失 Markdown 链接元数据，恢复含图片笔记的正文 wikilink 点击跳转。
 - 修复阅读块底部操作区的横向布局与裁剪，按钮保持同高并预留底部空间。
 - 笔记选择器使用 Tern 的受控 picker，按最长连续命中段降序排列，同分按路径排序。

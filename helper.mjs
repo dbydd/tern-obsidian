@@ -77,6 +77,13 @@ const asList = value => value == null ? [] : Array.isArray(value) ? value : [val
 const unique = values => [...new Set(values)];
 const slash = value => value.split(path.sep).join('/');
 
+async function toVaultRel(root, target) {
+  const absolute = await realpath(path.resolve(root, target));
+  const rel = slash(path.relative(root, absolute));
+  if (!absolute.startsWith(root + path.sep)) throw new Error('Path is outside the vault: ' + rel);
+  return rel;
+}
+
 export function splitFrontmatter(source) {
   source = source.replace(/^\uFEFF/, '');
   if (!source.startsWith('---\n') && !source.startsWith('---\r\n')) return { props: {}, body: source, offset: 0 };
@@ -602,7 +609,8 @@ export async function dispatch(request) {
   if (request.op === 'vaults') {
     return { focused: request.root ? await findVault(request.root) : null, known: await knownVaults() };
   }
-  const start = request.path || request.root || request.cwd;
+  const requestedPath = request.path ? path.resolve(request.cwd || process.cwd(), request.path) : undefined;
+  const start = requestedPath || request.root || request.cwd;
   let root = request.vault && !request.root ? null : await findVault(start);
   if (request.vault && !request.root) {
     for (const candidate of await knownVaults()) if (path.basename(candidate) === request.vault || candidate === request.vault) { root = await findVault(candidate); if (root) break; }
@@ -611,10 +619,9 @@ export async function dispatch(request) {
   if (request.op.startsWith('hindsight-')) return hindsight.dispatch(request, root);
   // Paged text read: the index is not needed, so this stays cheap on a cold cache.
   if (request.op === 'read') {
-    const given = String(request.rel || '');
-    const rel = path.isAbsolute(given) ? slash(path.relative(root, path.resolve(given))) : slash(given).replace(/^\/+/, '');
+    const given = String(request.rel || requestedPath || '');
+    const rel = await toVaultRel(root, given);
     const absolute = path.resolve(root, rel);
-    if (!absolute.startsWith(root + path.sep)) throw new Error('Path is outside the vault: ' + rel);
     let source;
     try { source = await readFile(absolute, 'utf8'); } catch (error) { throw new Error('Cannot read ' + rel + ': ' + error.message); }
     if (source.includes('\u0000')) throw new Error('Not a text file: ' + rel);
@@ -649,8 +656,8 @@ export async function dispatch(request) {
     return { root, total, matches };
   }
   if (request.op === 'links') {
-    const given = String(request.rel || '');
-    const rel = path.isAbsolute(given) ? slash(path.relative(root, path.resolve(given))) : slash(given).replace(/^\/+/, '');
+    const given = String(request.rel || requestedPath || '');
+    const rel = await toVaultRel(root, given);
     const note = index.notes.find(n => n.rel === rel);
     if (!note) throw new Error('Not a vault file: ' + rel);
     const out = note.links.map(target => resolveTarget(index, target, rel).note?.rel || target + ' (unresolved)');
@@ -672,7 +679,7 @@ export async function dispatch(request) {
     return { root, rel: resolved.note.rel, path: path.join(root, resolved.note.rel), line, anchor: resolved.anchor, ext: resolved.note.ext };
   }
   if (request.op === 'tag') return { root, view: node('col', null, [section('#' + request.tag, index.notes.filter(n => !n.excluded && n.tags.some(t => norm(t) === norm(request.tag) || norm(t).startsWith(norm(request.tag) + '/'))).map(n => linkText(n.rel, noteHref(root, n.rel))))]), title: '#' + request.tag };
-  const rel = request.rel || slash(path.relative(root, request.path));
+  const rel = await toVaultRel(root, request.rel || requestedPath);
   if (!index.notes.some(n => n.rel === rel)) throw new Error('File is outside the vault or unavailable: ' + rel);
   if (rel.toLowerCase().endsWith('.base')) {
     const visible = { ...index, notes: index.notes.filter(n => !n.excluded) };

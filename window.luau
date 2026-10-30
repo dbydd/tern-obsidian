@@ -54,35 +54,7 @@ local function open_note(cx: WindowCx, root: string, rel: string, anchor: string
 end
 
 local function pick_note(cx: WindowCx, root: string, ext: string?)
-	bridge.run({ op = "index", root = root }, function(result, err, next_cx)
-		if result == nil or next_cx == nil then
-			failure(next_cx, err)
-			return
-		end
-		local items: { PickItem } = {}
-		for _, note in result.notes do
-			if ext == nil or note.ext == ext then
-				local aliases = table.concat(note.aliases or {}, " · ")
-				local tags = table.concat(note.tags or {}, " #")
-				table.insert(items, {
-					label = note.name .. (if aliases ~= "" then " · " .. aliases else "") .. (if tags ~= "" then " #" .. tags else ""),
-					detail = note.rel,
-					rel = note.rel,
-				})
-			end
-		end
-		if #items == 0 then
-			next_cx:toast("info", "No matching vault files", result.root)
-			return
-		end
-		next_cx:pick({ items = items, placeholder = "Obsidian vault: " .. result.root, action = "open" }):next(function(item, pick_err, pick_cx)
-			if item and pick_cx then
-				open_note(pick_cx, result.root, item.rel :: string)
-			else
-				failure(pick_cx, pick_err)
-			end
-		end)
-	end)
+	cx:new_block("obsidian.note-picker", { root, ext or "" }, "over")
 end
 
 tern.override("open_file", function(cx)
@@ -245,6 +217,16 @@ tern.route.open(function(req, cx)
 end)
 
 tern.route.link(function(link, cx)
+	if link.url:match("^obsidian://picker%?") then
+		local query = bridge.query(link.url)
+		local id = tonumber(query.pane)
+		local pane = if id then cx.session:pane(id) else nil
+		if pane and pane.block == "obsidian.note-picker" then
+			cx.layout:close(id :: number)
+			if query.root and query.file then open_note(cx, query.root, query.file) end
+		end
+		return { handled = true }
+	end
 	if link.url:match("^obsidian://source%?") then
 		local query = bridge.query(link.url)
 		if query.path then cx.docs:open(query.path) end

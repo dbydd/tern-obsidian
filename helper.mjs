@@ -274,7 +274,11 @@ const lookups = new WeakMap();
 function lookupFor(index) {
   if (lookups.has(index)) return lookups.get(index);
   const paths = new Map(), names = new Map(), aliases = new Map();
-  const add = (map, key, note) => map.set(key, [...(map.get(key) || []), note]);
+  const add = (map, key, note) => {
+    const candidates = map.get(key);
+    if (!candidates) map.set(key, [note]);
+    else if (!candidates.some(candidate => candidate.rel === note.rel)) candidates.push(note);
+  };
   for (const note of index.notes) {
     add(paths, norm(note.rel), note);
     const basename = norm(path.posix.basename(note.rel));

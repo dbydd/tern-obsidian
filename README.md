@@ -4,7 +4,7 @@
 
 ## 安装
 
-环境要求：Tern 0.9.4 或兼容 SDK 版本、提供 `Bun.YAML` 的 Bun 版本。本机验证使用 Bun 1.4.2。
+环境要求：Tern 0.9.8 或兼容 SDK 版本、提供 `Bun.YAML` 的 Bun 版本。本机验证使用 Bun 1.4.2。
 
 ```sh
 cd tern-obsidian
@@ -21,7 +21,7 @@ tern plugin list
 
 | 入口 | 行为 |
 | --- | --- |
-| Open file… | 在当前仓库中搜索文件名、别名和标签，选择后打开笔记。末尾的 Open another file… 返回 Tern 原生选择器。 |
+| Open file… | 在当前仓库中模糊搜索文件名、别名和标签，选择后打开笔记。 |
 | Obsidian: Open note | 打开仓库文件选择器。当前块不属于仓库时，可以输入仓库绝对路径。 |
 | Obsidian: Open base | 选择并显示 `.base` 文件。 |
 | Obsidian: Refresh vault index | 重建当前仓库索引。 |
@@ -32,6 +32,8 @@ tern plugin list
 | Obsidian: Hindsight settings | 按仓库配置 Hindsight 孪生知识库的绑定、同步范围，并查看或启动同步作业。 |
 
 阅读块底部的 **Edit source** 打开原始文件，**Refresh** 重新读取笔记。键盘 `e`、`r` 对应这两个操作。源码编辑后的刷新会读取新内容。`tern open` 的 CLI 打开保留 Tern 原生文件编辑行为，适合 `EDITOR='tern open --wait'`。
+
+笔记选择器按最长连续命中段的字符数递减排序，同分按仓库相对路径排序。零散字母匹配继续参与检索。选择器临时占用当前块的位置，取消或选择后恢复原块。
 
 ## 仓库筛选
 
@@ -91,7 +93,7 @@ Carly 侧新增七个导出：`hindsight_status`、`hindsight_sync`、`hindsight
 
 ## 边界
 
-阅读块提供预览，原始文件由 Tern 文件编辑器编辑。标题和块引用跳转到原始文件的对应行。重名链接无法唯一确定目标时，阅读块显示歧义提示。
+阅读块提供预览，原始文件由 Tern 文件编辑器编辑。标题和块引用跳转到原始文件的对应行。同一文件的名称与重复别名各只形成一个候选。不同文件重名且无法唯一确定目标时，阅读块显示歧义提示。
 
 Bases 目前提供读取视图。汇总、完整 Obsidian 公式函数集、第三方视图和 Dataview 查询不在实现中。不支持的表达式会在对应视图显示错误。JSON Canvas 卡片阅读不提供空间编辑，白板导入不保留全部视觉样式。白板转 Markdown 保留文字与连接，不保留图形几何。
 
@@ -101,12 +103,20 @@ Bases 目前提供读取视图。汇总、完整 Obsidian 公式函数集、第�
 
 实现通过本机 SDK 的 `luau-lsp analyze`。实际 Tern 窗口验证覆盖：包含数千篇笔记的真实仓库、`.base` 多维表格、Open file 搜索选择、wikilink 点击跳转、标题/块引用解析、属性和标签显示、Tern canvas 导出后读取 Markdown 内容，以及筛选与 Hindsight 两个 `prefs` 面板。
 
+短链接验证覆盖唯一文件名、重复别名、不同目录重名、同目录优先、路径和锚点。Alexandria 的 BGAI 精读报告经 `renderNote` 渲染后无歧义提示。底部按钮在 396 × 573、396 × 1240 和 813 × 595 px 阅读区中完整显示，两个操作均通过点击验证。匹配排序的固定样例连续长度为 9、9、6、1，同分重复运行 10 次保持一致；真实选择器中 `attention` 返回 89 个结果。
+
+含图片的报告拆分成 Markdown 片段时保留 `marks` 链接元数据。实际界面中，BGAI 精读报告的“BGAI 摘要”生成带目标地址的 `.sf-link`，Command 点击后打开 `papers/abstracts/broadcast-gated-attention-abstract.md`，显示对应论文标题和官方摘要。
+
 Hindsight 侧：真实仓库（Alexandria，`obsidian-alexandria`）完成只读验收，`baselineInherited` 计入 3487 条继承文档，recall 与 reflect 的引用可回读原文；隔离仓库（`tern-obsidian-test`）完成增、改、删、故障 ECONNREFUSED 保留 failed、同 job_id 幂等重试、中断后台续跑，以及 `syncOnEdit=false` 时 watcher 返回 disabled。
 
 ## 更新日志
 
 ### 未发布
 
+- 修复短 wikilink 的重复候选，保留不同文件重名时的歧义提示。
+- 修复图片分段丢失 Markdown 链接元数据，恢复含图片笔记的正文 wikilink 点击跳转。
+- 修复阅读块底部操作区的横向布局与裁剪，按钮保持同高并预留底部空间。
+- 笔记选择器使用 Tern 的受控 picker，按最长连续命中段降序排列，同分按路径排序。
 - Carly 读取接口：`vaults`、`vault`、`find`、`read`、`links`，全部只读，根目录可取焦点 pane 所属仓库。
 - 仓库筛选：`obsidian.filters` 块用 `prefs` 设置页编辑 allow/deny glob，配置写在仓库内 `.obsidian/tern-obsidian/settings.json`。
 - Hindsight 孪生知识库：`obsidian.hindsight` 设置页、后台同步作业引擎，以及 `hindsight_status`、`hindsight_sync`、`hindsight_recall`、`hindsight_reflect`、`mental_model`、`knowledge`、`hindsight_config` 七个 Carly 导出。

@@ -6,7 +6,7 @@
  * markdown block is already close, so this only narrows and spaces it.
  */
 
-.sf-main[data-surface='plugin.obsidian.note'] .sf-col {
+.sf-main[data-role='obsidian.reader'] .sf-col {
 	padding: 4px 8px 24px;
 	line-height: 1.6;
 }
@@ -16,8 +16,8 @@
  * `width: 100%` keeps the box inside a narrow pane; without it a flex item
  * sizes to its content, and auto margins then centre an overflow sideways.
  */
-.sf-main[data-surface='plugin.obsidian.note'] .sf-col > .sf-col,
-.sf-main[data-surface='plugin.obsidian.note'] .sf-md {
+.sf-main[data-role='obsidian.reader'] .sf-col > .sf-col,
+.sf-main[data-role='obsidian.reader'] .sf-md {
 	width: 100%;
 	max-width: 760px;
 	margin-left: auto;
@@ -25,23 +25,47 @@
 }
 
 /* Section heads (Properties, Tags, Links, Outline, Backlinks) stay quiet. */
-.sf-main[data-surface='plugin.obsidian.note'] .sf-section-head {
+.sf-main[data-role='obsidian.reader'] .sf-section-head {
 	margin-bottom: 4px;
 }
 
 /* Properties: a compact key column, values wrap instead of being cut. */
-.sf-main[data-surface='plugin.obsidian.note'] .sf-kv {
+.sf-main[data-role='obsidian.reader'] .sf-kv {
 	font-size: 0.95em;
 }
 
-.sf-main[data-surface='plugin.obsidian.note'] .sf-kv .sf-t-muted {
+.sf-main[data-role='obsidian.reader'] .sf-kv .sf-t-muted {
 	padding-right: 12px;
 }
 
 /* Tag chips sit on one wrapped line rather than one per row. */
-.sf-main[data-surface='plugin.obsidian.note'] .sf-section[data-role='tags'] .sf-text {
+.sf-main[data-role='obsidian.reader'] .sf-section[data-role='tags'] .sf-text {
 	display: inline-block;
 	padding: 1px 8px 1px 0;
+}
+
+.sf-dock[data-role='obsidian.actions'] {
+	flex: none;
+	margin: 0;
+	padding: 6px 8px 12px;
+	box-sizing: border-box;
+}
+
+[data-role='obsidian.actions'] {
+	display: flex;
+	flex-direction: row;
+	flex-wrap: wrap;
+	align-items: center;
+	column-gap: 8px;
+	row-gap: 8px;
+	min-height: 24px;
+}
+
+[data-role='obsidian.actions'] > .sf-badge {
+	flex: none;
+	align-self: center;
+	height: 24px;
+	box-sizing: border-box;
 }
 
 /*

@@ -10,7 +10,7 @@ export type Context = "host" | "window"
 export type ToastLevel = "success" | "info" | "error"
 
 --- Where a file or block opens relative to the focused pane.
-export type How = "default" | "beside" | "below" | "split" | "tab" | "replace" | "preview"
+export type How = "default" | "beside" | "below" | "split" | "tab" | "replace" | "over" | "preview"
 
 --- What asked Tern to open a file.
 export type Origin = "palette" | "files" | "drop" | "link" | "system" | "cli" | "carly"

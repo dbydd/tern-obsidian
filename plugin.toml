@@ -9,6 +9,12 @@ window = "window.luau"
 styles = ["obsidian.css"]
 
 [[blocks]]
+id = "note-picker"
+title = "Open note"
+icon = "file"
+palette = false
+
+[[blocks]]
 id = "note"
 title = "Obsidian Note"
 files = ["*.md", "*.base", "*.canvas"]

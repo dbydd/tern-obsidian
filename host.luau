@@ -1,6 +1,7 @@
 --!strict
 local bridge = require("./bridge")
 local ui = tern.ui
+require("./note-picker")()
 
 type State = {
 	path: string,
@@ -41,16 +42,21 @@ local function inline_images(node: any, blobs: { [string]: string }): any
 		end
 		local rows: { Node } = {}
 		local rest = text
+		local function markdown(part: string): Node
+			local props = table.clone(node.p)
+			props.text = part
+			return ui.node("md", props)
+		end
 		while true do
 			local from, to, index = rest:find("!%[%[tern%-image:(%d+)%]%]")
 			if from == nil then
 				if rest ~= "" then
-					table.insert(rows, tern.ui.md(rest))
+					table.insert(rows, markdown(rest))
 				end
 				break
 			end
 			if from > 1 then
-				table.insert(rows, tern.ui.md(rest:sub(1, from - 1)))
+				table.insert(rows, markdown(rest:sub(1, from - 1)))
 			end
 			local blob = blobs[index :: string]
 			if blob then
@@ -131,7 +137,10 @@ tern.block.define("note", {
 		source.p = { text = "Edit source", tone = "accent", actions = { click = "source" } }
 		local refresh = ui.badge("Refresh", "neutral")
 		refresh.p = { text = "Refresh", tone = "neutral", actions = { click = "refresh" } }
-		return { main = ui.col(children), dock = ui.row({ source, refresh }) }
+		return {
+			main = ui.node("col", { role = "obsidian.reader" }, children),
+			dock = ui.node("row", { role = "obsidian.actions" }, { source, refresh }),
+		}
 	end,
 	event = function(state: State, event: UiEvent, cx: BlockCx)
 		if event.act == "refresh" then
